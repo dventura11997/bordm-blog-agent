@@ -882,3 +882,4 @@ if (passingArticles.length > 0) {
   passingArticles.forEach((a, i) => log('done', `  ${i + 1}. ${today}-${a.slug}.md`));
 }
 log('done', '=========================================');
+process.exit(0);
