@@ -1,0 +1,14 @@
+FIRST TIME SETUP:
+  npm install
+
+RUN (real):
+  node --env-file=.env automation/publish.mjs
+
+RUN (dry run, no API calls):
+  DRY_RUN=1 node --env-file=.env automation/publish.mjs
+
+PAUSE agent:
+  Edit automation/config.json -> set "paused": true
+
+OUTPUT goes to:
+  ../bordm-site/src/content/articles/

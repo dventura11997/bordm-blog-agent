@@ -1,0 +1,14 @@
+{
+  "name": "bordm-blog-agent",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "publish": "node automation/publish.mjs",
+    "dry-run": "cross-env DRY_RUN=1 node automation/publish.mjs"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.0",
+    "rss-parser": "^3.13.0"
+  }
+}
