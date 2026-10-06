@@ -325,7 +325,7 @@ async function callOpenAI(messages, tools = null, _retries = 1) {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(300_000),
     });
   } catch (e) {
     if (e.name === 'TimeoutError' && _retries > 0) {
