@@ -68,6 +68,17 @@ if (config.paused) {
 const DRY_RUN = !!process.env.DRY_RUN;
 if (DRY_RUN) log('config', 'DRY_RUN mode active -- all AI calls will be skipped with canned data.');
 
+if (!DRY_RUN) {
+  const missing = [];
+  if (!process.env.OPENAI_API_KEY) missing.push('OPENAI_API_KEY');
+  if (!process.env.Z_API_KEY)      missing.push('Z_API_KEY');
+  if (missing.length) {
+    fail('startup', `Missing required env var(s): ${missing.join(', ')} -- aborting`);
+    process.exit(1);
+  }
+  log('startup', 'Required env vars present: OPENAI_API_KEY, Z_API_KEY');
+}
+
 const SELECTION_COUNT = 5;
 log('config', `Target articles per run: ${SELECTION_COUNT}`);
 
@@ -125,7 +136,13 @@ if (recentItems.length === 0) {
 
 // ── Step 4: Dedupe ────────────────────────────────────────────────────────────
 
-const publishedUrls = new Set(JSON.parse(readFileSync(PUBLISHED_PATH, 'utf8')));
+let _publishedRaw = [];
+try {
+  _publishedRaw = JSON.parse(readFileSync(PUBLISHED_PATH, 'utf8'));
+} catch (e) {
+  warn('dedupe', `published.json unreadable (${e.message}) -- starting with empty list`);
+}
+const publishedUrls = new Set(_publishedRaw);
 log('dedupe', `${publishedUrls.size} URL(s) already recorded in published.json`);
 
 const existingFiles = readdirSync(ARTICLES_DIR);
@@ -295,19 +312,32 @@ async function fetchJikanIcon(seriesName) {
 
 // ── OpenAI helper ─────────────────────────────────────────────────────────────
 
-async function callOpenAI(messages, tools = null) {
+async function callOpenAI(messages, tools = null, _retries = 1) {
+  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY env var is not set');
   const body = {
     model: process.env.OPENAI_MODEL || (() => { throw new Error('OPENAI_MODEL env var is not set'); })(),
     messages,
   };
   if (tools) { body.tools = tools; body.tool_choice = 'auto'; }
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let res;
+  try {
+    res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
+    });
+  } catch (e) {
+    if (e.name === 'TimeoutError' && _retries > 0) {
+      warn('openai', `Request timed out -- retrying (${_retries} attempt(s) left)...`);
+      return callOpenAI(messages, tools, _retries - 1);
+    }
+    fail('openai', `Fetch failed: ${e.message}`);
+    throw e;
+  }
   if (!res.ok) {
     const text = await res.text();
+    fail('openai', `API error ${res.status}: ${text}`);
     throw new Error(`OpenAI API error ${res.status}: ${text}`);
   }
   return res.json();
@@ -532,31 +562,41 @@ async function callGLM(userPrompt, articleIndex) {
     });
   }
 
+  if (!process.env.Z_API_KEY) throw new Error('Z_API_KEY env var is not set');
+
   log('write', `  Calling GLM-5.3 (reasoning_effort=low)...`);
   log('write', `  Prompt size: ${userPrompt.length} chars`);
 
   for (const endpoint of Z_AI_ENDPOINTS) {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${process.env.Z_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'glm-5.3',
-        reasoning_effort: 'low',
-        messages: [
-          { role: 'system', content: WRITER_SYSTEM },
-          { role: 'user',   content: userPrompt },
-        ],
-      }),
-    });
+    let res;
+    try {
+      res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.Z_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'glm-5.3',
+          reasoning_effort: 'low',
+          messages: [
+            { role: 'system', content: WRITER_SYSTEM },
+            { role: 'user',   content: userPrompt },
+          ],
+        }),
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (e) {
+      warn('write', `  ${endpoint} failed (${e.message}) -- trying next endpoint...`);
+      continue;
+    }
     if (res.status === 404) {
       warn('write', `404 on ${endpoint} -- trying fallback endpoint...`);
       continue;
     }
     if (!res.ok) {
       const text = await res.text();
+      fail('write', `Z.ai API error ${res.status}: ${text}`);
       throw new Error(`Z.ai API error ${res.status}: ${text}`);
     }
     const data = await res.json();
@@ -564,7 +604,7 @@ async function callGLM(userPrompt, articleIndex) {
     log('write', `  GLM-5.3 response received (${content.length} chars)`);
     return content;
   }
-  throw new Error('All z.ai endpoints returned 404.');
+  throw new Error('All z.ai endpoints failed (404 or timeout).');
 }
 
 function stripFences(str) {
@@ -818,7 +858,13 @@ function resolveTag(articleType) {
 }
 
 const today = new Date().toISOString().slice(0, 10);
-const published = JSON.parse(readFileSync(PUBLISHED_PATH, 'utf8'));
+let published;
+try {
+  published = JSON.parse(readFileSync(PUBLISHED_PATH, 'utf8'));
+} catch (e) {
+  warn('write', `published.json unreadable (${e.message}) -- starting fresh`);
+  published = [];
+}
 let filesWritten = 0;
 
 for (const article of passingArticles) {
